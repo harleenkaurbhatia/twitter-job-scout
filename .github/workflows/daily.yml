@@ -1,0 +1,26 @@
+name: Daily job scout
+
+on:
+  schedule:
+    - cron: "30 3 * * *"  # 09:00 IST every day
+  workflow_dispatch: {}    # lets you trigger a run manually from the Actions tab
+
+jobs:
+  scout:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - run: pip install -r requirements.txt
+      - run: npm install -g @anthropic-ai/claude-code
+      - run: python scout.py
+        env:
+          TWITTERAPI_KEY: ${{ secrets.TWITTERAPI_KEY }}
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}

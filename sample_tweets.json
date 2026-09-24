@@ -1,0 +1,7 @@
+[
+ {"id":"1","url":"https://x.com/a/status/1","text":"We're hiring a Founder's Office lead, fully remote (India ok). You'll work directly with me on GTM, ops and product. $60-80k. High agency folks DM me.","likes":120,"author":{"handle":"sf_founder","name":"Priya R","bio":"CEO @ Loopwise (YC W25). Ex-Stripe. IIT Delhi.","location":"San Francisco","followers":8200}},
+ {"id":"2","url":"https://x.com/b/status/2","text":"Looking for a job in product management, 3 YOE, open to referrals! #hiring","likes":4,"author":{"handle":"jobseeker1","name":"Rahul","bio":"Aspiring PM","location":"Pune","followers":150}},
+ {"id":"3","url":"https://x.com/c/status/3","text":"Hiring Forward Deployed Engineers (customer-facing) in Singapore. Relocation + visa sponsored for candidates from India. Great comp.","likes":340,"author":{"handle":"sgai","name":"Wei Tan","bio":"Co-founder @ Arcline AI, Stanford CS, ex-Palantir","location":"Singapore","followers":15000}},
+ {"id":"4","url":"https://x.com/d/status/4","text":"Just closed our $12M Series A led by Accel. Scaling the team 3x this year in Bangalore.","likes":900,"author":{"handle":"blr_ceo","name":"Ankit M","bio":"Founder @ Fabrik. IIM A, IIT Bombay. 2x founder.","location":"Bengaluru","followers":22000}},
+ {"id":"5","url":"https://x.com/e/status/5","text":"URGENT HIRING!!! Java developers 2-5 yrs Hyderabad, send CV to hr@xyzconsult.com","likes":1,"author":{"handle":"xyz_jobs","name":"XYZ Consulting Jobs","bio":"Daily job alerts","location":"India","followers":300}}
+]
