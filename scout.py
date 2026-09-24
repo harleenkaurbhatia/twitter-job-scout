@@ -4,6 +4,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -52,16 +53,27 @@ def fetch_tweets():
     seen, out = set(), []
     for q in QUERIES:
         query = f"{q} -filter:retweets lang:en since:{since}"
-        try:
-            r = requests.get(
-                "https://api.twitterapi.io/twitter/tweet/advanced_search",
-                headers={"X-API-Key": key},
-                params={"query": query, "queryType": "Latest"},
-                timeout=30,
-            )
-            r.raise_for_status()
-        except requests.RequestException as e:
-            print(f"query failed: {q[:60]}... ({e})", file=sys.stderr)
+        r = None
+        # Free tier allows ~1 request per 5s; pace calls and back off on 429.
+        for attempt in range(4):
+            time.sleep(6 * (attempt + 1))
+            try:
+                r = requests.get(
+                    "https://api.twitterapi.io/twitter/tweet/advanced_search",
+                    headers={"X-API-Key": key},
+                    params={"query": query, "queryType": "Latest"},
+                    timeout=30,
+                )
+                if r.status_code == 429:
+                    continue
+                r.raise_for_status()
+                break
+            except requests.RequestException as e:
+                print(f"query failed: {q[:60]}... ({e})", file=sys.stderr)
+                r = None
+                break
+        if r is None or not r.ok:
+            print(f"query skipped: {q[:60]}...", file=sys.stderr)
             continue
         for t in r.json().get("tweets", []):
             created = parse_time(t.get("createdAt"))
@@ -144,7 +156,7 @@ SECTIONS = [
 
 
 def esc(s):
-    return str(s or "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    return str(s or "").replace("<", "&lt;").replace(">", "&gt;")
 
 
 def format_slack(picks, n_scanned):
