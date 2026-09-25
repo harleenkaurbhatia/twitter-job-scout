@@ -5,6 +5,7 @@
 # Roles I want
 - Founder's Office / Chief of Staff, Product (APM, PM, founding PM), Forward Deployed Engineer / FDE (business-facing), BizOps / Strategy at startups.
 - Must be high agency, working directly with the founders.
+- I'm early career: prefer roles open to 0-4 years of experience (APM, associate, founder's office associate, early FDE). Skip senior-only roles (8+ yrs, VP, Director).
 
 # Compensation
 - Target 35 LPA+ (roughly USD 40k+ remote, or strong local pay if onsite abroad).

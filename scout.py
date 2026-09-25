@@ -7,6 +7,7 @@ import sys
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from urllib.parse import quote_plus
 
 import requests
 
@@ -44,6 +45,20 @@ def parse_time(s):
         return datetime.strptime(s, "%a %b %d %H:%M:%S %z %Y")
     except (TypeError, ValueError):
         return None
+
+
+def expanded_urls(obj):
+    """Collect every expanded_url nested anywhere in a twitterapi.io entities blob."""
+    found = []
+    if isinstance(obj, dict):
+        if obj.get("expanded_url"):
+            found.append(obj["expanded_url"])
+        for v in obj.values():
+            found += expanded_urls(v)
+    elif isinstance(obj, list):
+        for v in obj:
+            found += expanded_urls(v)
+    return list(dict.fromkeys(found))
 
 
 def fetch_tweets():
@@ -86,12 +101,15 @@ def fetch_tweets():
                 "url": t.get("url") or f"https://x.com/{a.get('userName')}/status/{t.get('id')}",
                 "text": t.get("text", ""),
                 "likes": t.get("likeCount", 0),
+                "links": expanded_urls([t.get("entities"), (t.get("quoted_tweet") or {}).get("entities")]),
                 "author": {
                     "handle": a.get("userName"),
                     "name": a.get("name"),
                     "bio": a.get("description") or (a.get("profile_bio") or {}).get("description", ""),
+                    "links": expanded_urls([a.get("entities"), a.get("profile_bio")]),
                     "location": a.get("location"),
                     "followers": a.get("followers"),
+                    "can_dm": a.get("canDm"),
                 },
             })
     print(f"fetched {len(out)} unique tweets from {len(QUERIES)} queries", file=sys.stderr)
@@ -106,13 +124,26 @@ For each tweet, decide if it is a genuinely relevant opportunity for me. Ignore:
 job-board bots, engineering-only roles (unless FDE), internships, low-pay signals, people LOOKING for jobs,
 and anything not in my target roles. Use the author's bio to judge founder pedigree (IIT, IIM, YC, Ivy, ex-FAANG, etc).
 
-Return ONLY a JSON array (no prose, no code fences) of the relevant ones, best first, max 25 items:
+Pick the relevant ones (best first, max 15). Then, for each pick, use WebSearch to research it:
+- the LinkedIn profile URL of the person I should contact: the poster if they are the founder/hiring manager,
+  otherwise the founder or hiring manager (only return a URL you are confident is the right person, else "")
+- what the company does (one line)
+- the application link: prefer a job/apply URL from the tweet's "links"; otherwise the company's careers page
+  or the specific job listing you find; else "" (then I'll DM them).
+
+Return ONLY a JSON array (no prose, no code fences):
 [{{"id": "...", "category": "REMOTE_INTL|ONSITE_ABROAD|INDIA_TOP|REACH_OUT", "score": 1-10,
-  "role": "...", "company": "...", "location": "...", "pay": "stated pay or 'not stated'",
-  "founder": "who is hiring + pedigree evidence from bio, or 'unknown'",
+  "role": "...", "role_summary": "1-2 lines: what the job actually involves and who it's for",
+  "company": "...", "company_blurb": "one line on what the company does, stage/funding if known",
+  "location": "...", "pay": "stated pay or 'not stated'", "seniority": "e.g. 0-3 yrs / early career / senior",
+  "poster": "poster's name + title, with pedigree evidence (IIT, YC, ex-Stripe...) or 'unknown'",
+  "contact": "full name of the person I should contact",
+  "linkedin": "that person's https://www.linkedin.com/in/... or ''",
+  "apply_link": "https://... or ''",
   "why": "one line on why this fits me",
   "opener": "a one-line personalised DM opener I could send"}}]
-Score higher for: my priority order, strong founder pedigree, direct founder contact, explicit high pay, high agency.
+Score higher for: my priority order, strong founder pedigree, direct founder contact, explicit high pay, high agency,
+and roles open to early-career people (0-4 yrs). Score senior-only roles (8+ yrs, VP/Director) low or skip them.
 Refer to people by name or they/them, never guess pronouns. If nothing is relevant, return [].
 
 TWEETS:
@@ -129,8 +160,8 @@ def rank(tweets):
     )
     # Headless Claude Code; authenticates via CLAUDE_CODE_OAUTH_TOKEN (Claude Pro/Max plan).
     res = subprocess.run(
-        ["claude", "-p", "--output-format", "json", "--model", "sonnet"],
-        input=prompt, capture_output=True, text=True, timeout=600,
+        ["claude", "-p", "--output-format", "json", "--model", "sonnet", "--allowedTools", "WebSearch"],
+        input=prompt, capture_output=True, text=True, timeout=1500,
     )
     if res.returncode != 0:
         raise RuntimeError(f"claude failed: {res.stderr or res.stdout}")
@@ -143,7 +174,9 @@ def rank(tweets):
     for p in picks:
         t = by_id.get(str(p.get("id")), {})
         p["url"] = t.get("url", "")
+        p["text"] = t.get("text", "")
         p["handle"] = (t.get("author") or {}).get("handle", "")
+        p["name"] = (t.get("author") or {}).get("name", "")
     return picks
 
 
@@ -171,13 +204,25 @@ def format_slack(picks, n_scanned):
             continue
         lines = [f"\n*{title}*"]
         for p in items:
+            linkedin = p.get("linkedin") or (
+                "https://www.linkedin.com/search/results/people/?keywords="
+                + quote_plus(f"{p.get('contact') or p.get('name', '')} {p.get('company', '')}")
+            )
+            li_label = f"{p.get('contact') or 'Poster'} on LinkedIn" if p.get("linkedin") else f"Search {p.get('contact') or 'poster'} on LinkedIn"
+            apply = (f"<{p['apply_link']}|Apply here>" if p.get("apply_link")
+                     else f"No link found. DM <https://x.com/{p.get('handle')}|@{esc(p.get('handle'))}> on X")
+            post = esc(p.get("text", "")).replace("\n", " ")
+            post = post[:400] + ("…" if len(post) > 400 else "")
             lines.append(
                 f"*[{p.get('score')}/10] {esc(p.get('role'))} @ {esc(p.get('company'))}*"
-                f" · {esc(p.get('location'))} · {esc(p.get('pay'))}\n"
-                f"> :bust_in_silhouette: @{esc(p.get('handle'))}: {esc(p.get('founder'))}\n"
-                f"> {esc(p.get('why'))}\n"
-                f"> :speech_balloon: _{esc(p.get('opener'))}_\n"
-                f"> <{p.get('url')}|Open tweet>"
+                f" · {esc(p.get('location'))} · {esc(p.get('pay'))} · {esc(p.get('seniority'))}\n"
+                f":bust_in_silhouette: *Posted by:* {esc(p.get('poster'))} · <{linkedin}|{li_label}>\n"
+                f":page_facing_up: *Role:* {esc(p.get('role_summary'))}\n"
+                f":office: *Company:* {esc(p.get('company'))}: {esc(p.get('company_blurb'))}\n"
+                f":link: *Apply:* {apply}\n"
+                f":bird: *Post:* <{p.get('url')}|Open on X>\n> {post}\n"
+                f":dart: _{esc(p.get('why'))}_\n"
+                f":speech_balloon: DM opener: _{esc(p.get('opener'))}_\n"
             )
         chunks.append("\n".join(lines))
     # Slack caps a message around 40k chars; split conservatively.
