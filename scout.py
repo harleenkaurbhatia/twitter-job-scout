@@ -13,7 +13,7 @@ import requests
 
 ROOT = Path(__file__).parent
 LOOKBACK_HOURS = 26  # a bit over a day so nothing slips between runs
-MAX_CANDIDATES = 250
+BATCH_SIZE = 150  # tweets per Claude call
 
 # X advanced-search queries. Edit freely; each costs roughly one page (~20 tweets).
 QUERIES = [
@@ -61,36 +61,45 @@ def expanded_urls(obj):
     return list(dict.fromkeys(found))
 
 
-def fetch_tweets():
+def search_page(key, query, cursor):
+    """One page of advanced search. Free tier allows ~1 request per 5s; pace calls and back off on 429."""
+    for attempt in range(4):
+        time.sleep(6 * (attempt + 1))
+        try:
+            r = requests.get(
+                "https://api.twitterapi.io/twitter/tweet/advanced_search",
+                headers={"X-API-Key": key},
+                params={"query": query, "queryType": "Latest", "cursor": cursor},
+                timeout=30,
+            )
+            if r.status_code == 429:
+                continue
+            r.raise_for_status()
+            return r.json()
+        except requests.RequestException as e:
+            print(f"query failed: {query[:60]}... ({e})", file=sys.stderr)
+            return None
+    return None
+
+
+def fetch_tweets(hours=LOOKBACK_HOURS, pages=1):
     key = os.environ["TWITTERAPI_KEY"]
-    cutoff = datetime.now(timezone.utc) - timedelta(hours=LOOKBACK_HOURS)
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
     since = (cutoff - timedelta(days=1)).strftime("%Y-%m-%d")
     seen, out = set(), []
     for q in QUERIES:
         query = f"{q} -filter:retweets lang:en since:{since}"
-        r = None
-        # Free tier allows ~1 request per 5s; pace calls and back off on 429.
-        for attempt in range(4):
-            time.sleep(6 * (attempt + 1))
-            try:
-                r = requests.get(
-                    "https://api.twitterapi.io/twitter/tweet/advanced_search",
-                    headers={"X-API-Key": key},
-                    params={"query": query, "queryType": "Latest"},
-                    timeout=30,
-                )
-                if r.status_code == 429:
-                    continue
-                r.raise_for_status()
+        tweets, cursor = [], ""
+        for _ in range(pages):
+            data = search_page(key, query, cursor)
+            if not data:
+                print(f"query skipped: {q[:60]}...", file=sys.stderr)
                 break
-            except requests.RequestException as e:
-                print(f"query failed: {q[:60]}... ({e})", file=sys.stderr)
-                r = None
+            tweets += data.get("tweets", [])
+            cursor = data.get("next_cursor")
+            if not data.get("has_next_page") or not cursor:
                 break
-        if r is None or not r.ok:
-            print(f"query skipped: {q[:60]}...", file=sys.stderr)
-            continue
-        for t in r.json().get("tweets", []):
+        for t in tweets:
             created = parse_time(t.get("createdAt"))
             if t.get("id") in seen or (created and created < cutoff):
                 continue
@@ -113,7 +122,7 @@ def fetch_tweets():
                 },
             })
     print(f"fetched {len(out)} unique tweets from {len(QUERIES)} queries", file=sys.stderr)
-    return out[:MAX_CANDIDATES]
+    return out
 
 
 RANK_PROMPT = """You are my job scout. Below is my profile, then a JSON list of recent tweets.
@@ -124,7 +133,7 @@ For each tweet, decide if it is a genuinely relevant opportunity for me. Ignore:
 job-board bots, engineering-only roles (unless FDE), internships, low-pay signals, people LOOKING for jobs,
 and anything not in my target roles. Use the author's bio to judge founder pedigree (IIT, IIM, YC, Ivy, ex-FAANG, etc).
 
-Pick the relevant ones (best first, max 15). Then, for each pick, use WebSearch to research it:
+Pick the relevant ones (best first, max {max_picks}). Then, for each pick, use WebSearch to research it:
 - the LinkedIn profile URL of the person I should contact: the poster if they are the founder/hiring manager,
   otherwise the founder or hiring manager (only return a URL you are confident is the right person, else "")
 - what the company does (one line)
@@ -151,10 +160,24 @@ TWEETS:
 """
 
 
-def rank(tweets):
+def rank(tweets, max_picks=15):
+    """Rank in batches so a week of tweets fits in Claude's context; keep the best overall."""
+    picks = []
+    for i in range(0, len(tweets), BATCH_SIZE):
+        batch = tweets[i:i + BATCH_SIZE]
+        print(f"ranking tweets {i + 1}-{i + len(batch)} of {len(tweets)}", file=sys.stderr)
+        try:
+            picks += rank_batch(batch, min(max_picks, 10))
+        except (RuntimeError, ValueError, subprocess.TimeoutExpired) as e:
+            print(f"batch failed: {e}", file=sys.stderr)
+    return sorted(picks, key=lambda p: -int(p.get("score") or 0))[:max_picks]
+
+
+def rank_batch(tweets, max_picks):
     if not tweets:
         return []
     prompt = RANK_PROMPT.format(
+        max_picks=max_picks,
         profile=(ROOT / "profile.md").read_text(),
         tweets=json.dumps(tweets, ensure_ascii=False),
     )
@@ -192,9 +215,9 @@ def esc(s):
     return str(s or "").replace("<", "&lt;").replace(">", "&gt;")
 
 
-def format_slack(picks, n_scanned):
+def format_slack(picks, n_scanned, title_suffix=""):
     date = datetime.now(timezone.utc).strftime("%d %b %Y")
-    header = f"*Job scout, {date}*: {len(picks)} picks from {n_scanned} tweets scanned"
+    header = f"*Job scout, {date}{title_suffix}*: {len(picks)} picks from {n_scanned} tweets scanned"
     if not picks:
         return [header + "\nNothing worth your time today."]
     chunks = [header]
@@ -202,7 +225,7 @@ def format_slack(picks, n_scanned):
         items = [p for p in picks if p.get("category") == cat]
         if not items:
             continue
-        lines = [f"\n*{title}*"]
+        chunks.append(f"\n*{title}*")
         for p in items:
             linkedin = p.get("linkedin") or (
                 "https://www.linkedin.com/search/results/people/?keywords="
@@ -213,7 +236,7 @@ def format_slack(picks, n_scanned):
                      else f"No link found. DM <https://x.com/{p.get('handle')}|@{esc(p.get('handle'))}> on X")
             post = esc(p.get("text", "")).replace("\n", " ")
             post = post[:400] + ("…" if len(post) > 400 else "")
-            lines.append(
+            chunks.append(
                 f"*[{p.get('score')}/10] {esc(p.get('role'))} @ {esc(p.get('company'))}*"
                 f" · {esc(p.get('location'))} · {esc(p.get('pay'))} · {esc(p.get('seniority'))}\n"
                 f":bust_in_silhouette: *Posted by:* {esc(p.get('poster'))} · <{linkedin}|{li_label}>\n"
@@ -224,7 +247,6 @@ def format_slack(picks, n_scanned):
                 f":dart: _{esc(p.get('why'))}_\n"
                 f":speech_balloon: DM opener: _{esc(p.get('opener'))}_\n"
             )
-        chunks.append("\n".join(lines))
     # Slack caps a message around 40k chars; split conservatively.
     msgs, cur = [], ""
     for c in chunks:
@@ -246,12 +268,16 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--sample", help="use tweets from a JSON file instead of calling twitterapi.io")
     ap.add_argument("--dry-run", action="store_true", help="print the Slack message instead of posting")
+    ap.add_argument("--days", type=float, default=LOOKBACK_HOURS / 24, help="how far back to scan")
+    ap.add_argument("--pages", type=int, default=1, help="result pages per query (~20 tweets each)")
+    ap.add_argument("--max-picks", type=int, default=15)
     args = ap.parse_args()
     load_env()
 
-    tweets = json.loads(Path(args.sample).read_text()) if args.sample else fetch_tweets()
-    picks = sorted(rank(tweets), key=lambda p: -int(p.get("score") or 0))
-    msgs = format_slack(picks, len(tweets))
+    tweets = json.loads(Path(args.sample).read_text()) if args.sample else fetch_tweets(args.days * 24, args.pages)
+    picks = rank(tweets, args.max_picks)
+    suffix = f" (past {args.days:g} days)" if args.days > 1.5 else ""
+    msgs = format_slack(picks, len(tweets), suffix)
     if args.dry_run:
         print("\n---\n".join(msgs))
     else:
